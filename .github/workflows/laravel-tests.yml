@@ -1,4 +1,4 @@
-name: Laravel Tests
+name: Laravel MySQL Tests
 
 on:
   pull_request:
@@ -15,25 +15,46 @@ permissions:
   contents: read
 
 concurrency:
-  group: laravel-tests-${{ github.workflow }}-${{ github.ref }}
+  group: laravel-mysql-tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   tests:
-    name: laravel-tests
+    name: laravel-mysql-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gitlearn_testing
+          MYSQL_USER: laravel
+          MYSQL_PASSWORD: secret
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
 
     env:
       APP_ENV: testing
       APP_DEBUG: false
 
-      DB_CONNECTION: sqlite
-      DB_DATABASE: ${{ github.workspace }}/database/database.sqlite
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_DATABASE: gitlearn_testing
+      DB_USERNAME: laravel
+      DB_PASSWORD: secret
 
       CACHE_STORE: array
       SESSION_DRIVER: array
       QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
 
     steps:
       - name: Checkout repository
@@ -43,21 +64,9 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: "8.3"
-          extensions: mbstring, pdo_sqlite, sqlite3, intl
+          extensions: mbstring, pdo_mysql, intl
           coverage: none
           tools: composer:v2
-
-      - name: Get Composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Composer packages
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-composer-
 
       - name: Display environment information
         run: |
@@ -73,17 +82,38 @@ jobs:
       - name: Prepare Laravel environment
         run: |
           cp .env.example .env
-          touch database/database.sqlite
           php artisan key:generate
           php artisan config:clear
+
+      - name: Wait for MySQL
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if php -r '
+              try {
+                  new PDO(
+                      "mysql:host=127.0.0.1;port=3306;dbname=gitlearn_testing",
+                      "laravel",
+                      "secret"
+                  );
+                  exit(0);
+              } catch (Throwable $exception) {
+                  exit(1);
+              }
+            '; then
+              echo "MySQL is ready."
+              exit 0
+            fi
+
+            echo "Waiting for MySQL... attempt ${attempt}/30"
+            sleep 2
+          done
+
+          echo "MySQL did not become ready."
+          exit 1
 
       - name: Run database migrations
         run: php artisan migrate --force
 
-      - name: Display Laravel information
-        run: |
-          php artisan --version
-          php artisan about
-
       - name: Run Laravel tests
-        run: php artisan test
+        run: php artisan test --stop-on-failure
